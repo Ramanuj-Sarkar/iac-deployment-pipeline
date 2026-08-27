@@ -17,3 +17,6 @@ venv/
 # Secrets / local env
 .env
 *.local
+
+# macOS
+.DS_Store

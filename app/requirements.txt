@@ -1,0 +1,6 @@
+flask==3.0.3
+gunicorn==22.0.0
+SQLAlchemy==2.0.32
+psycopg[binary]==3.2.9
+alembic==1.13.2
+pydantic==2.8.2

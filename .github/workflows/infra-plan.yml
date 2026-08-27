@@ -1,0 +1,47 @@
+name: infra-plan
+
+on:
+  pull_request:
+    paths: ["infra/**", ".github/workflows/infra-plan.yml"]
+
+# Both jobs need Azure credentials (OIDC federation recommended):
+#   az login via azure/login@v2 with a federated workload-identity credential.
+# They run plan/what-if only — apply happens on merge to main from a separate,
+# environment-gated workflow.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: terraform init
+      - run: terraform validate
+      - run: terraform plan -var-file=dev.tfvars -var="db_admin_password=${{ secrets.DB_ADMIN_PASSWORD }}"
+
+  bicep-whatif:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: |
+          az deployment group what-if \
+            --resource-group iacdemo-dev-rg \
+            --template-file infra/bicep/main.bicep \
+            --parameters infra/bicep/main.dev.parameters.json \
+            --parameters dbAdminPassword="${{ secrets.DB_ADMIN_PASSWORD }}"
