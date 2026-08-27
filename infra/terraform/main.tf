@@ -26,7 +26,13 @@ provider "azurerm" {
   features {}
 }
 
-provider "cloudflare" {}
+# The Cloudflare provider validates its config even when no DNS record is
+# managed (cloudflare_zone_id unset -> cloudflare_record has count 0), so a
+# token must always be present. The placeholder default is never used for a
+# real API call; override it only when you actually set cloudflare_zone_id.
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}
 
 locals {
   name_prefix = "iacdemo-${var.environment_name}"

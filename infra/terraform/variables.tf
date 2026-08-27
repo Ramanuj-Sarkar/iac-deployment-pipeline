@@ -33,3 +33,10 @@ variable "cloudflare_zone_id" {
   type        = string
   default     = ""
 }
+
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token. Required only when cloudflare_zone_id is set; the placeholder default lets the provider initialize when no DNS record is managed. Must be 40 alphanumeric chars to pass the provider's own validation."
+  type        = string
+  default     = "placeholdertokenplaceholdertokenplacehld"
+  sensitive   = true
+}

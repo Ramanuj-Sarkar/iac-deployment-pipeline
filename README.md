@@ -112,6 +112,11 @@ Terraform composes across providers: it manages a Cloudflare DNS `CNAME`
 pointing at the app in the same apply, which ARM/Bicep can't do natively. That
 trade-off is the actual reason teams pick one over the other.
 
+The Cloudflare DNS record is opt-in: leave `cloudflare_zone_id` unset and no
+record is managed (the `cloudflare_api_token` variable keeps its placeholder
+default so the provider still initializes). To enable it, set `cloudflare_zone_id`
+and pass a real token via `TF_VAR_cloudflare_api_token`.
+
 ## Deploying
 
 Both stacks take an environment name and a DB admin password — pass the
