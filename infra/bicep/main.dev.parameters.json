@@ -3,7 +3,6 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "environmentName": { "value": "dev" },
-    "dbAdminUsername": { "value": "appadmin" },
-    "containerImage": { "value": "myregistry.azurecr.io/app:latest" }
+    "dbAdminUsername": { "value": "appadmin" }
   }
 }

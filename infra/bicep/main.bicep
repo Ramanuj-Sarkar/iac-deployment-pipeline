@@ -11,10 +11,18 @@ param dbAdminUsername string = 'appadmin'
 @description('Postgres administrator password')
 param dbAdminPassword string
 
-@description('Container image to deploy, e.g. myregistry.azurecr.io/app:latest')
-param containerImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+@description('Container image for the app. Leave empty on the first deployment — a public quickstart image is used so the Container App comes up healthy before the new ACR has anything in it. Then push your image and redeploy with this set to that reference.')
+param containerImage string = ''
 
 var namePrefix = 'iacdemo-${environmentName}'
+
+// Stable per resource group, so redeploys reuse the same names. Keeps the
+// globally-unique names (ACR, Key Vault, Postgres) from colliding with other
+// deployments of this template.
+var suffix = substring(uniqueString(resourceGroup().id), 0, 4)
+
+var useAcr = !empty(containerImage)
+var effectiveImage = useAcr ? containerImage : 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   name: '${namePrefix}-logs'
@@ -26,7 +34,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 }
 
 resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: replace('${namePrefix}acr', '-', '')
+  name: replace('${namePrefix}${suffix}acr', '-', '')
   location: location
   sku: { name: 'Basic' }
   properties: {
@@ -35,7 +43,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
 }
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: '${namePrefix}-kv'
+  name: '${namePrefix}-${suffix}-kv'
   location: location
   properties: {
     sku: { family: 'A', name: 'standard' }
@@ -64,7 +72,7 @@ resource kvSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 }
 
 resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-preview' = {
-  name: '${namePrefix}-psql'
+  name: '${namePrefix}-${suffix}-psql'
   location: location
   sku: {
     name: 'Standard_B1ms'
@@ -131,6 +139,12 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       '${appIdentity.id}': {}
     }
   }
+  // Ordered after the role assignment. Propagation of the assignment still
+  // races the container's secret pull, but Container Apps retries secret
+  // resolution, and by the time this resource is reached the ~5-minute Postgres
+  // create has already elapsed since kvSecretsUser. (Terraform makes the wait
+  // explicit with a time_sleep; ARM has no clean equivalent without a
+  // deployment script.)
   dependsOn: [kvSecretsUser]
   properties: {
     managedEnvironmentId: containerAppEnv.id
@@ -139,18 +153,21 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         external: true
         targetPort: 8000
       }
-      registries: [
+      // ACR credentials are only wired when pulling from the private registry.
+      // The first deployment (public placeholder image) omits them.
+      registries: useAcr ? [
         {
           server: acr.properties.loginServer
           username: acr.listCredentials().username
           passwordSecretRef: 'acr-password'
         }
-      ]
-      secrets: [
+      ] : []
+      secrets: concat(useAcr ? [
         {
           name: 'acr-password'
           value: acr.listCredentials().passwords[0].value
         }
+      ] : [], [
         {
           // Resolved from Key Vault at runtime via the app's managed identity;
           // the connection string never lands in the image or the revision spec.
@@ -158,13 +175,13 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           keyVaultUrl: dbConnectionSecret.properties.secretUri
           identity: appIdentity.id
         }
-      ]
+      ])
     }
     template: {
       containers: [
         {
           name: 'app'
-          image: containerImage
+          image: effectiveImage
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -188,3 +205,5 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
 output acrLoginServer string = acr.properties.loginServer
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 output keyVaultName string = keyVault.name
+output usingPlaceholderImage bool = !useAcr
+output nextImageRef string = '${acr.properties.loginServer}/todo-api:v1'

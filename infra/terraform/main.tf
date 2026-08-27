@@ -10,6 +10,14 @@ terraform {
       source  = "cloudflare/cloudflare"
       version = "~> 4.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.11"
+    }
   }
 
   # In real use, configure a remote backend (azurerm storage account) so
@@ -23,7 +31,15 @@ terraform {
 }
 
 provider "azurerm" {
-  features {}
+  features {
+    key_vault {
+      # So `terraform destroy` actually purges the vault instead of leaving it
+      # in soft-delete, where its globally-unique name would block the next
+      # `apply` for 90 days.
+      purge_soft_delete_on_destroy    = true
+      recover_soft_deleted_key_vaults = true
+    }
+  }
 }
 
 # The Cloudflare provider validates its config even when no DNS record is
@@ -34,8 +50,26 @@ provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
 
+# Short random suffix so the globally-unique resource names (ACR, Key Vault,
+# Postgres) don't collide with other clones of this repo or with a prior
+# soft-deleted vault of the same name.
+resource "random_string" "suffix" {
+  length  = 4
+  lower   = true
+  upper   = false
+  numeric = true
+  special = false
+}
+
 locals {
   name_prefix = "iacdemo-${var.environment_name}"
+  suffix      = random_string.suffix.result
+
+  # Falls back to a public quickstart image so the very first `apply` produces a
+  # healthy Container App before any image exists in the new ACR. Set
+  # `container_image` (to the value in the `push_command` output) and re-apply.
+  container_image = var.container_image != "" ? var.container_image : "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+  image_in_acr    = var.container_image != ""
 }
 
 resource "azurerm_resource_group" "main" {
@@ -52,7 +86,7 @@ resource "azurerm_log_analytics_workspace" "main" {
 }
 
 resource "azurerm_container_registry" "main" {
-  name                = replace("${local.name_prefix}acr", "-", "")
+  name                = replace("${local.name_prefix}${local.suffix}acr", "-", "")
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   sku                 = "Basic"
@@ -60,12 +94,12 @@ resource "azurerm_container_registry" "main" {
 }
 
 resource "azurerm_key_vault" "main" {
-  name                       = "${local.name_prefix}-kv"
-  resource_group_name        = azurerm_resource_group.main.name
-  location                   = azurerm_resource_group.main.location
-  tenant_id                  = data.azurerm_client_config.current.tenant_id
-  sku_name                   = "standard"
-  enable_rbac_authorization  = true
+  name                      = "${local.name_prefix}-${local.suffix}-kv"
+  resource_group_name       = azurerm_resource_group.main.name
+  location                  = azurerm_resource_group.main.location
+  tenant_id                 = data.azurerm_client_config.current.tenant_id
+  sku_name                  = "standard"
+  enable_rbac_authorization = true
 }
 
 data "azurerm_client_config" "current" {}
@@ -93,8 +127,20 @@ resource "azurerm_role_assignment" "app_kv_secrets" {
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
+# Azure AD role assignments take up to a few minutes to propagate. Ordering via
+# depends_on isn't enough on its own — the first apply otherwise fails with a
+# 403 when the data-plane secret write (and the Container App's secret pull)
+# race ahead of propagation.
+resource "time_sleep" "wait_for_kv_role_propagation" {
+  depends_on = [
+    azurerm_role_assignment.deployer_kv_secrets,
+    azurerm_role_assignment.app_kv_secrets,
+  ]
+  create_duration = "60s"
+}
+
 resource "azurerm_postgresql_flexible_server" "main" {
-  name                   = "${local.name_prefix}-psql"
+  name                   = "${local.name_prefix}-${local.suffix}-psql"
   resource_group_name    = azurerm_resource_group.main.name
   location               = azurerm_resource_group.main.location
   version                = "16"
@@ -126,7 +172,7 @@ resource "azurerm_key_vault_secret" "db_connection" {
   key_vault_id = azurerm_key_vault.main.id
   value        = "postgresql://${var.db_admin_username}:${var.db_admin_password}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/${azurerm_postgresql_flexible_server_database.app.name}?sslmode=require"
 
-  depends_on = [azurerm_role_assignment.deployer_kv_secrets]
+  depends_on = [time_sleep.wait_for_kv_role_propagation]
 }
 
 resource "azurerm_container_app_environment" "main" {
@@ -147,15 +193,23 @@ resource "azurerm_container_app" "main" {
     identity_ids = [azurerm_user_assigned_identity.app.id]
   }
 
-  registry {
-    server               = azurerm_container_registry.main.login_server
-    username             = azurerm_container_registry.main.admin_username
-    password_secret_name = "acr-password"
+  # Only wire ACR credentials once we're actually pulling from the private
+  # registry. On the first apply (public placeholder image) these are omitted.
+  dynamic "registry" {
+    for_each = local.image_in_acr ? [1] : []
+    content {
+      server               = azurerm_container_registry.main.login_server
+      username             = azurerm_container_registry.main.admin_username
+      password_secret_name = "acr-password"
+    }
   }
 
-  secret {
-    name  = "acr-password"
-    value = azurerm_container_registry.main.admin_password
+  dynamic "secret" {
+    for_each = local.image_in_acr ? [1] : []
+    content {
+      name  = "acr-password"
+      value = azurerm_container_registry.main.admin_password
+    }
   }
 
   # Pulled from Key Vault at runtime using the app's managed identity —
@@ -181,7 +235,7 @@ resource "azurerm_container_app" "main" {
 
     container {
       name   = "app"
-      image  = var.container_image
+      image  = local.container_image
       cpu    = 0.5
       memory = "1Gi"
 
@@ -192,7 +246,7 @@ resource "azurerm_container_app" "main" {
     }
   }
 
-  depends_on = [azurerm_role_assignment.app_kv_secrets]
+  depends_on = [time_sleep.wait_for_kv_role_propagation]
 }
 
 # Multi-provider example: point a Cloudflare DNS record at the app,

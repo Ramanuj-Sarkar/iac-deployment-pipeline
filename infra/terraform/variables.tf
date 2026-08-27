@@ -23,9 +23,14 @@ variable "db_admin_password" {
 }
 
 variable "container_image" {
-  description = "Container image to deploy, e.g. myregistry.azurecr.io/app:latest"
+  description = <<-EOT
+    Container image for the app. Leave empty on the first apply — the config
+    falls back to a public quickstart image so the Container App comes up
+    healthy before the new ACR has anything in it. Then push your image (see
+    the `push_command` output) and set this to that reference and re-apply.
+  EOT
   type        = string
-  default     = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+  default     = ""
 }
 
 variable "cloudflare_zone_id" {

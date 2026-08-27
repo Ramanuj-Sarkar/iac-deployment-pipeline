@@ -119,23 +119,63 @@ and pass a real token via `TF_VAR_cloudflare_api_token`.
 
 ## Deploying
 
-Both stacks take an environment name and a DB admin password — pass the
-password as a secret, never commit it.
+Prereqs: `az login` (the deployer needs **Owner** or **User Access
+Administrator** — the stacks create role assignments), and a DB admin password
+that satisfies the Postgres policy (8–128 chars, 3 of upper/lower/digit/symbol,
+not containing the login). Generate one and keep it out of git:
+
+```bash
+export DB_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9_.-' < /dev/urandom | head -c 32)Aa1"
+```
+
+Deployment is **two phases**: stand up the infra with a public placeholder
+image, then push the real image to the freshly-created ACR and point the app
+at it. Resource names get a short random/`uniqueString` suffix, so parallel
+clones of this repo don't collide on the globally-unique ACR / Key Vault /
+Postgres names.
+
+### Terraform
 
 ```bash
 cd infra/terraform
+export TF_VAR_db_admin_password="$DB_PASSWORD"
+
+# phase 1 — infra + placeholder image
 terraform init
-terraform plan  -var-file=dev.tfvars -var="db_admin_password=$DB_PASSWORD"
-terraform apply -var-file=dev.tfvars -var="db_admin_password=$DB_PASSWORD"
+terraform apply -var-file=dev.tfvars
+
+# phase 2 — build, push, cut the app over (uses the `push_command` output)
+terraform output -raw push_command | sh   # or run the printed commands by hand
 ```
 
+Tear down with `terraform destroy` — the provider is configured to purge the
+Key Vault so its name is reusable immediately.
+
+### Bicep
+
 ```bash
-az deployment group create \
-  --resource-group iacdemo-dev-rg \
+az group create -n iacdemo-dev-rg -l eastus
+
+# phase 1
+az deployment group create -g iacdemo-dev-rg \
   --template-file infra/bicep/main.bicep \
   --parameters infra/bicep/main.dev.parameters.json \
-  --parameters dbAdminPassword=$DB_PASSWORD
+  --parameters dbAdminPassword="$DB_PASSWORD"
+
+# phase 2 — push, then redeploy with the image ref from the nextImageRef output
+IMG=$(az deployment group show -g iacdemo-dev-rg -n main --query properties.outputs.nextImageRef.value -o tsv)
+az acr login -n "${IMG%%.*}"
+docker build -t "$IMG" app && docker push "$IMG"
+az deployment group create -g iacdemo-dev-rg \
+  --template-file infra/bicep/main.bicep \
+  --parameters infra/bicep/main.dev.parameters.json \
+  --parameters dbAdminPassword="$DB_PASSWORD" containerImage="$IMG"
 ```
+
+After `az group delete`, the Key Vault lingers in soft-delete under its old
+name for 90 days; the `uniqueString` suffix changes with the new resource
+group, so a fresh deploy still succeeds. To reclaim the exact name:
+`az keyvault purge --name <vault-name>`.
 
 CI runs `terraform plan` and `az deployment group what-if` on every pull
 request touching `infra/`, and `app-ci` runs the pytest suite and a Docker
