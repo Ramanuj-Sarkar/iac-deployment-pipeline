@@ -30,7 +30,7 @@ USER appuser
 # --- test stage: adds dev-only deps, used by `docker compose run tests` ---
 FROM runtime AS test
 USER root
-COPY requirements-dev.txt .
+COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests/ ./tests/
 USER appuser
